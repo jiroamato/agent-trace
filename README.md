@@ -15,8 +15,8 @@ server through a custom base URL.
 npm install -g github:jiroamato/agent-trace
 ```
 
-That builds the tool on install, so nothing needs to be checked in. To update,
-run the same command again.
+The built output is checked in under `dist/`, so installing needs no build
+step and no dev dependencies. To update, run the same command again.
 
 To work on it from a clone instead:
 
@@ -399,12 +399,16 @@ line in `agents.ts`.
 ## Developing
 
 ```bash
-npm install        # also builds dist/
+npm install
 npm run dev        # run from source without building
 npm test           # vitest
 npm run typecheck
 npm run format
+npm run build      # refresh dist/ - commit it with your change
 ```
+
+`dist/` is committed so that `npm install -g github:...` works without a
+build step. CI fails if it is out of date with `src/`.
 
 Two tests exec a real POSIX shell to prove the printed command's quoting
 survives it. They are skipped on native Windows.
