@@ -12,11 +12,17 @@ server through a custom base URL.
 ## Install
 
 ```bash
-npm install -g github:jiroamato/agent-trace
+npm install -g https://github.com/jiroamato/agent-trace/archive/refs/heads/main.tar.gz
 ```
 
 The built output is checked in under `dist/`, so installing needs no build
 step and no dev dependencies. To update, run the same command again.
+
+The tarball URL is used on purpose. The shorter
+`npm install -g github:jiroamato/agent-trace` form clones the repo through
+npm's git support, and on Windows with npm 11 that left a global symlink
+pointing at a temporary clone directory npm had already deleted, so the bin
+could not find its own files. The tarball route has no such step.
 
 To work on it from a clone instead:
 
