@@ -1,0 +1,59 @@
+{
+  "name": "agent-trace",
+  "version": "0.1.0",
+  "description": "A local proxy that captures every request your coding agent sends to the model, as readable Markdown. Works with Claude Code, Codex, Copilot, OpenCode, Pi, OMP, Gemini CLI and more.",
+  "license": "MIT",
+  "author": "Jiro Amato",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiroamato/agent-trace.git"
+  },
+  "homepage": "https://github.com/jiroamato/agent-trace#readme",
+  "bugs": {
+    "url": "https://github.com/jiroamato/agent-trace/issues"
+  },
+  "keywords": [
+    "proxy",
+    "llm",
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "copilot",
+    "opencode",
+    "gemini-cli",
+    "system-prompt",
+    "observability"
+  ],
+  "type": "module",
+  "bin": {
+    "agent-trace": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "prettier": "^3.8.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.3"
+  }
+}
