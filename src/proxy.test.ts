@@ -70,6 +70,7 @@ describe("upstreamConnection", () => {
         agent: "omp",
         customBaseUrl: "http://localhost:11434",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );
@@ -86,6 +87,7 @@ describe("upstreamConnection", () => {
         agent: "omp",
         customBaseUrl: "http://model-server.internal",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );
@@ -102,6 +104,7 @@ describe("upstreamConnection", () => {
         agent: "omp",
         customBaseUrl: "https://model-server.internal",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );
@@ -118,6 +121,7 @@ describe("upstreamConnection", () => {
         agent: "omp",
         customBaseUrl: "https://model-server.internal:8443",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );
@@ -150,6 +154,7 @@ describe("upstreamPathPrefix", () => {
         agent: "omp",
         customBaseUrl: "https://api.deepseek.com",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );
@@ -162,6 +167,7 @@ describe("upstreamPathPrefix", () => {
         agent: "omp",
         customBaseUrl: "https://opencode.ai/zen/go",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );
@@ -174,6 +180,7 @@ describe("upstreamPathPrefix", () => {
         agent: "omp",
         customBaseUrl: "https://opencode.ai/zen/go",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );

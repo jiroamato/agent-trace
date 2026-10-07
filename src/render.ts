@@ -36,9 +36,15 @@ interface RenderInput {
 
 const REDACT = new Set([
   "authorization",
+  "proxy-authorization",
+  "cookie",
   "x-api-key",
   "api-key",
   "x-goog-api-key",
+  // Copilot CLI (1.0.92) sends a signed per-session JWT on every model call,
+  // next to the GitHub bearer token. It grants the same access for as long
+  // as it lives, so it is a secret too.
+  "copilot-session-token",
 ]);
 
 /**
@@ -243,6 +249,10 @@ function renderAnthropicRequest(j: any): string {
     "stop_sequences",
     "tool_choice",
     "thinking",
+    // Claude Code 2.1.x sends server-side context edits (clear_thinking,
+    // and the like) here. They change what the model sees, so they belong
+    // next to the other sampling settings.
+    "context_management",
     "metadata",
   ]);
   if (params) parts.push(params);
@@ -286,7 +296,19 @@ function renderAnthropicSystem(system: any): string {
 
 function renderAnthropicTools(tools: any[]): string {
   const rendered = tools.map((tool) => {
-    const lines = [`### ${tool.name ?? "(unnamed tool)"}`, ""];
+    // With tool search on (ENABLE_TOOL_SEARCH, the default Claude Code
+    // behaviour this tool preserves) most tools arrive deferred: the model
+    // sees the name only until it searches for the schema. The heading says
+    // so, because "which tools were really in the prompt" is exactly the
+    // question a student reads this file to answer.
+    const deferred = tool.defer_loading ? " (deferred)" : "";
+    const lines = [`### ${tool.name ?? "(unnamed tool)"}${deferred}`, ""];
+    // Server-side and built-in tools (bash_20250124, web_search_20250305,
+    // tool_search_tool_regex_20251119, ...) carry a versioned type and no
+    // schema of their own; the type is what identifies them.
+    if (typeof tool.type === "string" && tool.type !== "custom") {
+      lines.push(`- **type**: ${tool.type}`, "");
+    }
     if (tool.description) lines.push(tool.description, "");
     if (tool.input_schema) lines.push(fenceJson(tool.input_schema));
     return lines.join("\n");
@@ -329,6 +351,33 @@ function renderAnthropicContent(content: any): string {
             block.thinking ?? "",
             "",
             "</thinking>",
+          ].join("\n");
+        // Tool search (Claude Code 2.1.x): once the model has searched for
+        // a deferred tool, its schema is loaded into context by reference
+        // on the next turn. The reference is all the agent sends; the
+        // schema itself is expanded server-side.
+        case "tool_reference":
+          return `<tool-reference name="${block.tool_name ?? ""}" />`;
+        // Server-side tools (web search, tool search) are called and
+        // answered inside the same assistant turn. The call reads like a
+        // tool_use; the result keeps its own type in the tag so the two
+        // halves can be told apart from a client tool round trip.
+        case "server_tool_use":
+          return [
+            `<server-tool-use name="${block.name}" id="${block.id ?? ""}">`,
+            "",
+            fenceJson(block.input ?? {}),
+            "",
+            "</server-tool-use>",
+          ].join("\n");
+        case "web_search_tool_result":
+        case "tool_search_tool_result":
+          return [
+            `<server-tool-result type="${block.type}" tool-use-id="${block.tool_use_id ?? ""}">`,
+            "",
+            fenceJson(block.content ?? null),
+            "",
+            "</server-tool-result>",
           ].join("\n");
         default:
           return fenceJson(block);
@@ -373,15 +422,31 @@ function renderOpenAIRequest(j: any): string {
   ]);
   if (params) parts.push(params);
 
-  // /responses uses `instructions` as the system prompt.
+  // /responses uses `instructions` as the system prompt. Codex 0.160.0 no
+  // longer sends it at all: its system prompt now arrives as a run of
+  // `developer` messages at the head of `input`, which render below as the
+  // messages they are, roles and all.
   if (typeof j.instructions === "string" && j.instructions.length > 0) {
     parts.push(
       ["<system-prompt>", "", j.instructions, "", "</system-prompt>"].join("\n")
     );
   }
 
-  if (Array.isArray(j.tools) && j.tools.length > 0) {
-    parts.push(renderOpenAITools(j.tools));
+  // Codex 0.160.0 also moved its tool definitions out of the top-level
+  // `tools` array into an `additional_tools` input item (a developer-role
+  // item holding namespaces of tools). Both forms render under <tools>, so
+  // a capture reads the same whichever one the agent used.
+  const toolItems = Array.isArray(j.input)
+    ? j.input.filter((item: any) => item?.type === "additional_tools")
+    : [];
+  const tools = [
+    ...(Array.isArray(j.tools) ? j.tools : []),
+    ...toolItems.flatMap((item: any) =>
+      Array.isArray(item.tools) ? item.tools : []
+    ),
+  ];
+  if (tools.length > 0) {
+    parts.push(renderOpenAITools(tools));
   }
 
   // /chat/completions => messages ; /responses => input (string or items)
@@ -402,23 +467,54 @@ function renderOpenAIRequest(j: any): string {
       ].join("\n")
     );
   } else if (Array.isArray(j.input)) {
-    parts.push(renderMessages(j.input, renderOpenAIResponsesContent));
+    // The additional_tools items were rendered under <tools> above, so they
+    // are not repeated here as messages.
+    parts.push(
+      renderMessages(
+        j.input.filter((item: any) => item?.type !== "additional_tools"),
+        renderOpenAIResponsesContent
+      )
+    );
   }
 
   return parts.join("\n\n");
 }
 
-function renderOpenAITools(tools: any[]): string {
-  const rendered = tools.map((tool) => {
-    // chat: { type: "function", function: { name, description, parameters } }
-    // responses: { type: "function", name, description, parameters }
-    const fn = tool.function ?? tool;
-    const lines = [`### ${fn.name ?? tool.type ?? "(unnamed tool)"}`, ""];
-    if (fn.description) lines.push(fn.description, "");
-    if (fn.parameters) lines.push(fenceJson(fn.parameters));
-    return lines.join("\n");
+function renderOpenAITools(tools: any[], namespace?: string): string {
+  const rendered = tools.flatMap((tool) => {
+    // Codex groups its tools under namespaces ({ type: "namespace", name,
+    // tools: [...] }). The members render flat, each marked with the
+    // namespace it came from, so the headings stay one per tool.
+    if (tool?.type === "namespace" && Array.isArray(tool.tools)) {
+      return [renderOpenAIToolList(tool.tools, tool.name)];
+    }
+    return [renderOpenAITool(tool, namespace)];
   });
   return ["<tools>", "", rendered.join("\n\n"), "", "</tools>"].join("\n");
+}
+
+function renderOpenAIToolList(tools: any[], namespace?: string): string {
+  return tools.map((tool) => renderOpenAITool(tool, namespace)).join("\n\n");
+}
+
+function renderOpenAITool(tool: any, namespace?: string): string {
+  // chat: { type: "function", function: { name, description, parameters } }
+  // responses: { type: "function", name, description, parameters }
+  // custom (Codex): { type: "custom", name, description, format? }
+  const fn = tool.function ?? tool;
+  const lines = [`### ${fn.name ?? tool.type ?? "(unnamed tool)"}`, ""];
+  if (namespace) lines.push(`- **namespace**: ${namespace}`);
+  if (typeof tool.type === "string" && tool.type !== "function") {
+    lines.push(`- **type**: ${tool.type}`);
+  }
+  if (namespace || (typeof tool.type === "string" && tool.type !== "function"))
+    lines.push("");
+  if (fn.description) lines.push(fn.description, "");
+  if (fn.parameters) lines.push(fenceJson(fn.parameters));
+  // A custom tool takes free text rather than JSON arguments; its `format`
+  // (a grammar, when there is one) is the nearest thing to a schema.
+  else if (fn.format) lines.push(fenceJson(fn.format));
+  return lines.join("\n");
 }
 
 function renderOpenAIChatContent(msg: any): string {
@@ -487,6 +583,25 @@ function renderOpenAIResponsesContent(item: any): string {
         "</tool-use>",
       ].join("\n");
     case "function_call_output":
+      return [
+        `<tool-result call-id="${item.call_id ?? ""}">`,
+        "",
+        typeof item.output === "string" ? item.output : fenceJson(item.output),
+        "",
+        "</tool-result>",
+      ].join("\n");
+    // Codex's `exec` tool is a custom tool: the model sends free text (a
+    // JavaScript program) as `input`, not JSON arguments, so it is fenced
+    // as plain text rather than JSON.
+    case "custom_tool_call":
+      return [
+        `<tool-use name="${item.name}" id="${item.call_id ?? item.id ?? ""}">`,
+        "",
+        fence(item.input ?? ""),
+        "",
+        "</tool-use>",
+      ].join("\n");
+    case "custom_tool_call_output":
       return [
         `<tool-result call-id="${item.call_id ?? ""}">`,
         "",
@@ -915,7 +1030,10 @@ function renderOpenAIChatStream(events: any[]): string {
 
 function renderOpenAIResponsesStream(events: any[]): string {
   let text = "";
-  const toolCalls: Record<string, { name: string; args: string }> = {};
+  const toolCalls: Record<
+    string,
+    { name: string; args: string; custom: boolean }
+  > = {};
   let usage: any;
   let status: string | undefined;
 
@@ -926,14 +1044,28 @@ function renderOpenAIResponsesStream(events: any[]): string {
         break;
       case "response.function_call_arguments.delta": {
         const key = ev.item_id ?? "0";
-        toolCalls[key] ??= { name: "", args: "" };
+        toolCalls[key] ??= { name: "", args: "", custom: false };
+        toolCalls[key].args += ev.delta ?? "";
+        break;
+      }
+      // A custom tool call (Codex's exec) streams its free-text input
+      // under its own event name, the same way a function call streams its
+      // JSON arguments.
+      case "response.custom_tool_call_input.delta": {
+        const key = ev.item_id ?? "0";
+        toolCalls[key] ??= { name: "", args: "", custom: true };
         toolCalls[key].args += ev.delta ?? "";
         break;
       }
       case "response.output_item.added":
-        if (ev.item?.type === "function_call") {
+        if (
+          ev.item?.type === "function_call" ||
+          ev.item?.type === "custom_tool_call"
+        ) {
           const key = ev.item.id ?? "0";
-          toolCalls[key] ??= { name: "", args: "" };
+          const custom = ev.item.type === "custom_tool_call";
+          toolCalls[key] ??= { name: "", args: "", custom };
+          toolCalls[key].custom = custom;
           toolCalls[key].name = ev.item.name ?? toolCalls[key].name;
         }
         break;
@@ -958,7 +1090,7 @@ function renderOpenAIResponsesStream(events: any[]): string {
       [
         `<tool-use name="${tc.name}" id="${key}">`,
         "",
-        fence(tc.args || "{}", "json"),
+        tc.custom ? fence(tc.args) : fence(tc.args || "{}", "json"),
         "",
         "</tool-use>",
       ].join("\n")

@@ -205,11 +205,23 @@ describe("agentProviders", () => {
     expect(agentProviders("cursor")).toEqual([]);
   });
 
-  it("returns OMP's one internal template provider, even though the wizard never shows it", () => {
+  it("returns OMP's two internal template providers, even though the wizard never shows them", () => {
     // config.ts never calls agentProviders for an alwaysCustom agent - see
-    // askChoice - but the entry exists to hold the command/setup template
-    // resolveCustomTarget borrows from, so it is not empty here.
-    expect(agentProviders("omp").map((p) => p.id)).toEqual([CUSTOM_ID]);
+    // askChoice - but the entries exist to hold the setup-file template
+    // resolveCustomTarget borrows from, one per wire format, so it is not
+    // empty here.
+    expect(agentProviders("omp").map((p) => p.id)).toEqual([
+      "anthropic",
+      "openai",
+    ]);
+  });
+
+  it("hides Copilot's customOnly BYOK templates from the provider question", () => {
+    // They are borrowed by a custom target (see findCustomTemplate) and
+    // must never be offered as a route of their own: they have no upstream
+    // host to forward to.
+    expect(agentProviders("copilot").map((p) => p.id)).toEqual(["github"]);
+    expect(listProviders("copilot")).toEqual([]);
   });
 
   it("agrees with listProviders once there are two or more", () => {
@@ -667,8 +679,16 @@ describe("resolveChoice - notes and warnings", () => {
     expect(target("copilot").notes.join(" ")).toContain("MCP");
   });
 
-  it("warns a Copilot student that some models write no log", () => {
-    expect(target("copilot").warnings.join(" ")).toContain("WebSocket");
+  it("tells a Copilot student the WebSocket attempt falls back to HTTP, instead of warning that it writes no log", () => {
+    // Verified on Copilot CLI 1.0.92: the proxy answers the upgrade with
+    // 426 and the same turn arrives again as POST /responses over HTTP.
+    expect(target("copilot").notes.join(" ")).toContain("WebSocket");
+    expect(target("copilot").warnings).toEqual([]);
+  });
+
+  it("tells a Copilot student that the MCP and Auto-router calls are housekeeping", () => {
+    expect(target("copilot").notes.join(" ")).toContain("/auto");
+    expect(target("copilot").notes.join(" ")).toContain("not logged");
   });
 
   it("tells a Pi student on a ChatGPT subscription to use SSE", () => {
@@ -685,8 +705,26 @@ describe("resolveChoice - notes and warnings", () => {
     );
   });
 
-  it("tells a Gemini student the Google login is free", () => {
-    expect(target("gemini", "google-login").notes.join(" ")).toContain("free");
+  it("no longer tells a Gemini student the Google login is free", () => {
+    // Google cut individual accounts off on 2026-06-18, so the old "free
+    // tier" note would send a student straight into an empty logs folder.
+    expect(target("gemini", "google-login").notes.join(" ")).not.toContain(
+      "free tier"
+    );
+  });
+
+  it("warns a Gemini student that the Google login needs a Code Assist licence now", () => {
+    const warnings = target("gemini", "google-login").warnings.join(" ");
+    expect(warnings).toContain("2026-06-18");
+    expect(warnings).toContain("licence");
+    expect(warnings).toContain("Antigravity CLI");
+  });
+
+  it("leads Gemini with the API key route, since that is the one most students can still use", () => {
+    expect(listProviders("gemini").map((p) => p.id)).toEqual([
+      "api-key",
+      "google-login",
+    ]);
   });
 
   it("writes Antigravity CLI's settings file with modelProvider set to gemini", () => {
@@ -788,6 +826,27 @@ describe("shouldLogRequest", () => {
 
   it("logs a real OpenAI turn", () => {
     expect(shouldLogRequest("POST", "/v1/responses", "openai")).toBe(true);
+  });
+
+  it("logs a real Copilot turn, which has no /v1 prefix", () => {
+    expect(shouldLogRequest("POST", "/responses", "openai")).toBe(true);
+  });
+
+  it("drops Copilot's remote MCP traffic, which is JSON-RPC to a tool server", () => {
+    // Copilot CLI 1.0.92: server/discover and tools/list on the way into a
+    // turn, both before the real /responses call.
+    expect(shouldLogRequest("POST", "/mcp/readonly", "openai")).toBe(false);
+    expect(shouldLogRequest("POST", "/mcp", "openai")).toBe(false);
+  });
+
+  it("drops Copilot's Auto model-router call, which returns a routing decision rather than a reply", () => {
+    expect(shouldLogRequest("POST", "/auto", "openai")).toBe(false);
+    expect(shouldLogRequest("POST", "/auto?x=1", "openai")).toBe(false);
+  });
+
+  it("does not mistake a path that merely contains those words for housekeeping", () => {
+    expect(shouldLogRequest("POST", "/v1/automation", "openai")).toBe(true);
+    expect(shouldLogRequest("POST", "/mcpx/chat", "openai")).toBe(true);
   });
 
   it("logs a streaming Gemini turn", () => {
@@ -1302,8 +1361,37 @@ describe("resolveChoice - custom base URL, per-agent command template", () => {
     const written = JSON.parse(result.setup[0].body);
     expect(written.providers.openai).toEqual({
       baseUrl: "http://localhost:8787/v1",
-      models: [{ id: "qwen3:8b" }],
+      // openai-completions pins chat/completions: Pi's built-in openai
+      // provider would otherwise speak the Responses API, which the wire
+      // format the student chose does not promise. Verified on Pi 0.75.5.
+      models: [{ id: "qwen3:8b", api: "openai-completions" }],
     });
+  });
+
+  it("pins chat/completions for a raw/not-sure Pi custom target too, since that borrows the OpenAI template", () => {
+    const result = customTarget({
+      agent: "pi",
+      provider: CUSTOM_ID,
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "raw",
+      customModel: "qwen3:8b",
+    });
+    const written = JSON.parse(result.setup[0].body);
+    expect(written.providers.openai.models).toEqual([
+      { id: "qwen3:8b", api: "openai-completions" },
+    ]);
+  });
+
+  it("does not pin an api on Pi's Anthropic custom target, since there is only one Messages API", () => {
+    const result = customTarget({
+      agent: "pi",
+      provider: CUSTOM_ID,
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "anthropic",
+      customModel: "claude-x",
+    });
+    const written = JSON.parse(result.setup[0].body);
+    expect(written.providers.anthropic.models).toEqual([{ id: "claude-x" }]);
   });
 
   it("writes Pi's Anthropic provider key for an anthropic-compatible custom target, with the selected model", () => {
@@ -1385,14 +1473,113 @@ describe("resolveChoice - custom base URL, per-agent command template", () => {
     expect(result.upstreamBaseUrl).toBe("http://localhost:11434");
   });
 
-  it("reuses Copilot's own template regardless of the wire format chosen, since it has only one", () => {
+  it("uses Copilot's BYOK variables for a custom target, never the subscription route's COPILOT_API_URL", () => {
+    // COPILOT_API_URL tells the CLI where GitHub's own routing lives;
+    // pointed at a third-party server it would send GitHub-shaped requests
+    // with GitHub credentials. The COPILOT_PROVIDER_* route is the one
+    // Copilot CLI documents for a server you brought yourself.
+    const result = customTarget({
+      agent: "copilot",
+      provider: CUSTOM_ID,
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "qwen3:8b",
+    });
+    expect(result.command).toBe(
+      "COPILOT_PROVIDER_BASE_URL=http://localhost:8787/v1 " +
+        "COPILOT_PROVIDER_TYPE=openai COPILOT_MODEL=qwen3:8b copilot"
+    );
+    expect(result.command).not.toContain("COPILOT_API_URL");
+  });
+
+  it("gives Copilot's OpenAI-compatible custom target the /v1 suffix, because the CLI appends /chat/completions", () => {
+    const result = customTarget({
+      agent: "copilot",
+      provider: CUSTOM_ID,
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "qwen3:8b",
+    });
+    expect(result.baseUrl).toBe("http://localhost:8787/v1");
+  });
+
+  it("gives Copilot's Anthropic-compatible custom target no suffix, because the CLI appends /v1/messages", () => {
     const result = customTarget({
       agent: "copilot",
       provider: CUSTOM_ID,
       customBaseUrl: "http://localhost:11434",
       customRenderer: "anthropic",
+      customModel: "claude-x",
     });
-    expect(result.command).toContain("COPILOT_API_URL=http://localhost:8787");
+    expect(result.baseUrl).toBe("http://localhost:8787");
+    expect(result.command).toContain("COPILOT_PROVIDER_TYPE=anthropic");
+    expect(result.command).toContain("COPILOT_MODEL=claude-x");
+  });
+
+  it("defaults Copilot's raw/not-sure custom target to the OpenAI-compatible BYOK template", () => {
+    const result = customTarget({
+      agent: "copilot",
+      provider: CUSTOM_ID,
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "raw",
+      customModel: "qwen3:8b",
+    });
+    expect(result.command).toContain("COPILOT_PROVIDER_TYPE=openai");
+  });
+
+  it("requires a remembered model for every Copilot custom target, since the CLI refuses BYOK without one", () => {
+    for (const customRenderer of ["openai", "anthropic", "raw"] as const) {
+      const result = resolveChoice(
+        {
+          agent: "copilot",
+          provider: CUSTOM_ID,
+          customBaseUrl: "http://localhost:11434",
+          customRenderer,
+        },
+        PORT
+      );
+      expect(result.kind).toBe("error");
+      expect(result.kind === "error" && result.message).toContain("--force");
+    }
+  });
+
+  it("tells a Copilot custom-target student to export the provider API key", () => {
+    const result = customTarget({
+      agent: "copilot",
+      provider: CUSTOM_ID,
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "qwen3:8b",
+    });
+    expect(result.notes.join(" ")).toContain("COPILOT_PROVIDER_API_KEY");
+  });
+
+  it("shell-quotes a model ID that a plain KEY=value assignment could not carry", () => {
+    const result = customTarget({
+      agent: "copilot",
+      provider: CUSTOM_ID,
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "my model; echo",
+    });
+    expect(result.command).toContain("COPILOT_MODEL='my model; echo'");
+  });
+
+  it("uses PowerShell syntax for Copilot's BYOK variables on win32", () => {
+    const result = resolveChoice(
+      {
+        agent: "copilot",
+        provider: CUSTOM_ID,
+        customBaseUrl: "http://localhost:11434",
+        customRenderer: "openai",
+        customModel: "qwen3:8b",
+      },
+      { port: 8787, platform: "win32" }
+    );
+    expect(result.kind === "custom-target" && result.command).toBe(
+      "$env:COPILOT_PROVIDER_BASE_URL = 'http://localhost:8787/v1'; " +
+        "$env:COPILOT_PROVIDER_TYPE = 'openai'; $env:COPILOT_MODEL = 'qwen3:8b'; copilot"
+    );
   });
 
   it("never borrows Codex's ChatGPT-subscription template for a custom target", () => {
@@ -1420,11 +1607,24 @@ describe("customTargetNeedsModel", () => {
     expect(customTargetNeedsModel("opencode", "raw")).toBe(false);
   });
 
+  it("needs a model for OMP on every wire format, since a new OMP provider has no models until told", () => {
+    for (const renderer of ["openai", "anthropic", "raw"] as const) {
+      expect(customTargetNeedsModel("omp", renderer)).toBe(true);
+    }
+  });
+
+  it("needs a model for Copilot CLI on every wire format, since its BYOK route refuses to start without one", () => {
+    for (const renderer of ["openai", "anthropic", "raw"] as const) {
+      expect(customTargetNeedsModel("copilot", renderer)).toBe(true);
+    }
+  });
+
   it("needs no model for any other agent, on any wire format", () => {
     for (const renderer of ["openai", "anthropic", "raw"] as const) {
       expect(customTargetNeedsModel("codex", renderer)).toBe(false);
       expect(customTargetNeedsModel("claude-code", renderer)).toBe(false);
-      expect(customTargetNeedsModel("omp", renderer)).toBe(false);
+      expect(customTargetNeedsModel("gemini", renderer)).toBe(false);
+      expect(customTargetNeedsModel("junie", renderer)).toBe(false);
     }
   });
 });
@@ -1434,25 +1634,45 @@ describe("customTargetNeedsModel", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveChoice - OMP", () => {
-  it("resolves OMP straight from a base URL and wire format, with no provider needed", () => {
+  it("resolves OMP straight from a base URL, wire format and model, with no provider needed", () => {
     const result = resolveChoice(
       {
         agent: "omp",
         customBaseUrl: "http://localhost:8787",
         customRenderer: "openai",
+        customModel: "qwen3:8b",
       },
       PORT
     );
     expect(result.kind).toBe("custom-target");
   });
 
-  it("gives OMP its own bin, with no env vars", () => {
+  it("requires a remembered model for every OMP custom target", () => {
+    // A provider OMP has not heard of offers no models until models.yml
+    // lists one (verified on 18.7.0: a bare baseUrl under a new key
+    // validates and then leaves OMP with "No default model selected").
+    for (const customRenderer of ["openai", "anthropic", "raw"] as const) {
+      const result = resolveChoice(
+        {
+          agent: "omp",
+          customBaseUrl: "http://localhost:11434",
+          customRenderer,
+        },
+        PORT
+      );
+      expect(result.kind).toBe("error");
+      expect(result.kind === "error" && result.message).toContain("--force");
+    }
+  });
+
+  it("gives OMP its own bin with no env vars, pinning the selected model", () => {
     const result = customTarget({
       agent: "omp",
       customBaseUrl: "http://localhost:11434",
       customRenderer: "raw",
+      customModel: "qwen3:8b",
     });
-    expect(result.command).toBe("omp");
+    expect(result.command).toBe("omp --model custom/qwen3:8b");
   });
 
   it("gives OMP its YAML models file under ~/.omp/agent/models.yml", () => {
@@ -1460,31 +1680,113 @@ describe("resolveChoice - OMP", () => {
       agent: "omp",
       customBaseUrl: "http://localhost:11434",
       customRenderer: "raw",
+      customModel: "qwen3:8b",
     });
     expect(result.setup).toHaveLength(1);
     expect(result.setup[0].path).toBe("~/.omp/agent/models.yml");
     expect(result.setup[0].language).toBe("yaml");
   });
 
-  it("puts the resolved base URL under a provider key in the YAML file", () => {
+  it("writes a complete OpenAI-compatible provider for the openai route: base URL, api, key variable and model", () => {
+    const result = customTarget({
+      agent: "omp",
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "qwen3:8b",
+    });
+    expect(result.setup[0].body).toBe(
+      [
+        "providers:",
+        "  custom:",
+        '    baseUrl: "http://localhost:8787/v1"',
+        "    api: openai-completions",
+        "    apiKey: OPENAI_API_KEY",
+        "    models:",
+        '      - id: "qwen3:8b"',
+      ].join("\n")
+    );
+  });
+
+  it("gives the openai route the /v1 suffix, because OMP's chat-completions client appends /chat/completions", () => {
+    const result = customTarget({
+      agent: "omp",
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "qwen3:8b",
+    });
+    expect(result.baseUrl).toBe("http://localhost:8787/v1");
+  });
+
+  it("writes an Anthropic-compatible provider for the anthropic route, with no suffix", () => {
+    const result = customTarget({
+      agent: "omp",
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "anthropic",
+      customModel: "claude-x",
+    });
+    expect(result.baseUrl).toBe("http://localhost:8787");
+    expect(result.setup[0].body).toContain('baseUrl: "http://localhost:8787"');
+    expect(result.setup[0].body).toContain("api: anthropic-messages");
+    expect(result.setup[0].body).toContain("apiKey: ANTHROPIC_API_KEY");
+    expect(result.setup[0].body).toContain('- id: "claude-x"');
+    expect(result.setup[0].body).not.toContain("openai");
+  });
+
+  it("defaults OMP's raw/not-sure custom target to the OpenAI-compatible template", () => {
     const result = customTarget({
       agent: "omp",
       customBaseUrl: "http://localhost:11434",
       customRenderer: "raw",
+      customModel: "qwen3:8b",
     });
-    expect(result.setup[0].body).toContain('baseUrl: "http://localhost:8787"');
-    expect(result.setup[0].body).toContain("providers:");
+    expect(result.setup[0].body).toContain("api: openai-completions");
+  });
+
+  it("tells an OMP student the apiKey line is a variable name to export", () => {
+    const result = customTarget({
+      agent: "omp",
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "qwen3:8b",
+    });
+    expect(result.notes.join(" ")).toContain("environment variable");
+  });
+
+  it("shell-quotes an OMP model flag that a bare argument could not carry", () => {
+    const result = customTarget({
+      agent: "omp",
+      customBaseUrl: "http://localhost:11434",
+      customRenderer: "openai",
+      customModel: "my model",
+    });
+    expect(result.command).toBe("omp --model 'custom/my model'");
+  });
+
+  it("uses PowerShell quoting for that flag on win32", () => {
+    const result = resolveChoice(
+      {
+        agent: "omp",
+        customBaseUrl: "http://localhost:11434",
+        customRenderer: "openai",
+        customModel: "my model",
+      },
+      { port: 8787, platform: "win32" }
+    );
+    expect(result.kind === "custom-target" && result.command).toBe(
+      "omp --model 'custom/my model'"
+    );
   });
 
   it("still resolves OMP even when the saved provider field is stale", () => {
     // alwaysCustom agents ignore whatever is saved under `provider`; only the
-    // custom base URL and renderer matter.
+    // custom base URL, renderer and model matter.
     const result = resolveChoice(
       {
         agent: "omp",
         provider: "whatever-was-saved-before",
         customBaseUrl: "http://localhost:11434",
         customRenderer: "raw",
+        customModel: "qwen3:8b",
       },
       PORT
     );

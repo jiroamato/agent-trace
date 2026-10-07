@@ -68,10 +68,11 @@ shows you the raw JSON instead of a fully readable render, because it cannot
 safely guess a shape you did not tell it. See "What you get" below.
 
 For **OpenCode** with an **OpenAI-compatible** custom target, and for **every**
-**Pi** custom target, the wizard also tries the unauthenticated `/v1/models`
-endpoint and offers any model IDs it finds. You can always enter an ID
-manually, and the wizard falls back to manual entry if discovery fails.
-Endpoints that require credentials for model listing are not supported.
+**Pi**, **OMP** and **Copilot CLI** custom target, the wizard also asks which
+model to use. It tries the unauthenticated `/v1/models` endpoint first and
+offers any model IDs it finds. You can always enter an ID manually, and the
+wizard falls back to manual entry if discovery fails. Endpoints that require
+credentials for model listing are not supported.
 
 - OpenCode's printed command uses a temporary `OPENCODE_CONFIG_CONTENT`
   provider for that one run, merged with your existing OpenCode configuration
@@ -81,10 +82,21 @@ Endpoints that require credentials for model listing are not supported.
   built-in model list with the one you chose. Without this, Pi would keep
   offering its built-in model names (`gpt-4o`, and the like), which almost
   never exist on a custom server - the agent would start but every turn would
-  fail.
-- Pi asks for a model on every wire format, including Anthropic-compatible,
-  but discovery itself only ever checks the OpenAI-style `/v1/models` listing
-  endpoint, which an Anthropic-compatible server often does not expose. If
+  fail. On the OpenAI-compatible route the model entry also pins
+  `"api": "openai-completions"`, so Pi sends `chat/completions` as the wire
+  format you picked says, rather than the Responses API its built-in OpenAI
+  provider speaks and many local servers do not serve.
+- OMP writes a complete provider to `~/.omp/agent/models.yml` - base URL,
+  wire protocol, key variable and the model - and the printed command pins
+  that model with `--model`. OMP only offers models it has been told about,
+  so a provider with a base URL and nothing else leaves it with "No default
+  model selected". See "OMP" below for the key variable.
+- Copilot CLI's bring-your-own-key route refuses to start without an
+  explicit model, so the printed command sets `COPILOT_MODEL`. See "GitHub
+  Copilot CLI with your own server" below.
+- Every agent that asks for a model on the Anthropic-compatible wire format
+  still only ever checks the OpenAI-style `/v1/models` listing endpoint for
+  discovery, which an Anthropic-compatible server often does not expose. If
   discovery finds nothing there, that is expected, and typing the model ID by
   hand is the normal path, not a sign something is broken.
 
@@ -137,8 +149,9 @@ you without you having to clear anything.
 The one exception is a **Custom base URL** answer. There is no catalogue entry
 for it to be worked out from - you typed it - so the base URL and the wire
 format you chose are saved in the file too, alongside your choice. OpenCode's
-OpenAI-compatible custom route, and every Pi custom route, also save the
-selected model ID, so a remembered choice starts without repeating discovery.
+OpenAI-compatible custom route, and every Pi, OMP and Copilot CLI custom
+route, also save the selected model ID, so a remembered choice starts without
+repeating discovery.
 Everything else about a custom answer still behaves the same way: change it
 any time with `--force`, and it is never kept for an agent that cannot be
 logged.
@@ -148,19 +161,19 @@ logged.
 The tool prints the correct command for you, so you do not have to copy anything
 from this table. It is here so you can see what is supported before you start.
 
-| Agent           | Works | What you need                                                                            |
-| --------------- | ----- | ---------------------------------------------------------------------------------------- |
-| Claude Code     | Yes   | One command. Works with a subscription login, an Anthropic API key, or Google Vertex AI. |
-| Codex           | Yes   | One flag. A subscription or an API key works.                                            |
-| GitHub Copilot  | Yes   | Your normal subscription login.                                                          |
-| OpenCode        | Yes   | One command, or a config file.                                                           |
-| Pi              | Yes   | A config file. Pi has no base URL variable.                                              |
-| OMP             | Yes   | A YAML config file. Point it at any backend.                                             |
-| Gemini CLI      | Yes   | One command. The free Google login works.                                                |
-| Antigravity CLI | Yes   | A config file and a real Gemini API key - see below.                                     |
-| Junie           | Yes   | A config file, and a real API key pasted in - see below.                                 |
-| Cursor CLI      | No    | Nothing can make it work. See below.                                                     |
-| Amp             | No    | Nothing can make it work. See below.                                                     |
+| Agent           | Works | What you need                                                                             |
+| --------------- | ----- | ----------------------------------------------------------------------------------------- |
+| Claude Code     | Yes   | One command. Works with a subscription login, an Anthropic API key, or Google Vertex AI.  |
+| Codex           | Yes   | One flag. A subscription or an API key works.                                             |
+| GitHub Copilot  | Yes   | Your normal subscription login, or your own server through its BYOK variables.            |
+| OpenCode        | Yes   | One command, or a config file.                                                            |
+| Pi              | Yes   | A config file. Pi has no base URL variable.                                               |
+| OMP             | Yes   | A YAML config file and a model ID. Point it at any backend.                               |
+| Gemini CLI      | Yes   | One command with a Gemini API key. The Google login now needs a paid licence - see below. |
+| Antigravity CLI | Yes   | A config file and a real Gemini API key - see below.                                      |
+| Junie           | Yes   | A config file, and a real API key pasted in - see below.                                  |
+| Cursor CLI      | No    | Nothing can make it work. See below.                                                      |
+| Amp             | No    | Nothing can make it work. See below.                                                      |
 
 Any other provider - a local model server, or a smaller hosted one - works
 through **Custom base URL**, above, on any agent in this table except Cursor
@@ -180,6 +193,82 @@ folder stays empty with no error at all.
 This route only covers `CLOUD_ML_REGION=global`, the default and most common
 setting. A regional value (`us-east5`, say) talks to a different host and
 is not wired up yet. Ask for it via the issue tracker if you hit this.
+
+### Gemini CLI and the Google login
+
+On 2026-06-18 Google stopped serving Gemini CLI to individual Google
+accounts - the free tier, Google AI Pro and Google AI Ultra alike - and
+pointed them at Antigravity CLI instead. The Google-login route in this tool
+still exists and still reads `CODE_ASSIST_ENDPOINT` exactly as before, but
+for anyone without a Gemini Code Assist Standard or Enterprise licence the
+very first call now fails, before any model request is made:
+
+```
+This client is no longer supported for Gemini Code Assist for individuals.
+To continue using Gemini, please migrate to the Antigravity suite of products
+```
+
+Reproduced on Gemini CLI 0.33.0 with a personal account, with and without this
+tool in the path. The wizard now leads with the **Gemini API key** route, which
+is unaffected, and warns you on the login route. If you want the Google
+account route logged, use Antigravity CLI's API-key route below, or ask for its
+account sign-in via the issue tracker.
+
+### GitHub Copilot CLI with your own server
+
+Copilot CLI has two different ways to be pointed somewhere:
+
+- `COPILOT_API_URL` tells it where GitHub's own model routing lives. It is no
+  longer listed by `copilot help environment`, but Copilot CLI 1.0.92 still
+  reads it, and it is what the **GitHub subscription** route prints. Pointed
+  at a third-party server it would send GitHub-shaped requests (`/auto`,
+  `/models`, `/mcp/...`) with GitHub credentials, which is not what you want.
+- The `COPILOT_PROVIDER_*` family is the documented bring-your-own-key route:
+  a base URL, a provider type (`openai` or `anthropic`), a key, and a model.
+  It needs no GitHub login at all. This is what **Custom base URL** prints
+  for Copilot.
+
+So a Copilot custom target looks like:
+
+```bash
+COPILOT_PROVIDER_BASE_URL=http://localhost:8787/v1 COPILOT_PROVIDER_TYPE=openai COPILOT_MODEL=qwen3:8b copilot
+```
+
+Export `COPILOT_PROVIDER_API_KEY` yourself with the key your server expects
+(a local server that checks no key can leave it unset). The `openai` type
+sends `chat/completions` by default; add `COPILOT_PROVIDER_WIRE_API=responses`
+if your server only offers the Responses API. The `anthropic` type appends
+`/v1/messages` itself, so that route's base URL carries no `/v1`.
+
+On its GitHub route, Copilot talks to GitHub's remote MCP server
+(`POST /mcp/readonly`, JSON-RPC `server/discover` and `tools/list`) and asks
+its Auto model router (`POST /auto`) which model to use, around every real
+`/responses` call. Neither carries a system prompt or returns a model reply,
+so both are forwarded and shown as `(housekeeping, not logged)`, the same as
+token counting elsewhere. Copilot also tries a WebSocket for `/responses`
+first; this tool answers 426 and Copilot falls back to plain HTTP on the same
+turn, so the capture is complete. Both verified on 1.0.92.
+
+### OMP
+
+OMP's `models.yml` entry for a custom target has an `apiKey:` line that holds
+the **name of an environment variable**, not a key: `OPENAI_API_KEY` on the
+OpenAI-compatible route, `ANTHROPIC_API_KEY` on the Anthropic-compatible one.
+OMP resolves it from your environment at request time. Export it with the key
+your server expects. When it is not set, OMP sends the variable's name itself
+as the bearer token, which a local server that checks no key ignores - so one
+file works unchanged for a hosted provider and for Ollama.
+
+### Codex
+
+Codex 0.160.0 no longer sends an `instructions` field. Its system prompt
+arrives as a run of `developer` messages at the head of the input, and its
+tool definitions arrive inside an `additional_tools` input item rather than
+the top-level `tools` array. The capture shows the developer messages as the
+messages they are, roles and all, and lists the tools under `<tools>` as
+before, one heading per tool with the namespace they came from. Codex's
+`exec` tool is a _custom_ tool that takes a JavaScript program as free text
+rather than JSON arguments; its calls and results are rendered as plain text.
 
 ### Antigravity CLI
 
@@ -323,7 +412,12 @@ Different agents fan out differently, and that is worth watching:
 - **OpenCode** never counts tokens. Instead it makes a second call with a small
   model to title the thread, so one turn writes exactly two captures.
 - **Pi** never counts tokens at all, so every file is a real turn.
-- **Gemini** on the free Google login makes several extra calls that carry no
+- **Copilot** fetches `/models`, talks to GitHub's remote MCP server and asks
+  its Auto router which model to use before every turn. None of those is a
+  model call, so one turn writes exactly one capture.
+- **Codex** fetches `/models` and tries a WebSocket before falling back to
+  HTTP; one turn writes exactly one capture.
+- **Gemini** on the Google login makes several extra calls that carry no
   prompt. Those are not logged either.
 
 ### If your logs folder fills up in seconds
@@ -355,10 +449,11 @@ of these happened:
 1. **You changed agent and forgot to say so.** Run `agent-trace --force`. The
    line at the top of the console names the agent the tool currently thinks
    you use.
-2. **Your agent chose a WebSocket.** This tool reads HTTP. Some Copilot models,
-   and Pi's default transport, negotiate a WebSocket instead, and a WebSocket
-   turn writes no log at all. The printed command sets the right transport where
-   it can.
+2. **Your agent chose a WebSocket.** This tool reads HTTP. When an agent tries
+   to upgrade the connection, the tool answers 426 so the agent falls back to
+   plain HTTP; Codex and Copilot CLI do, on the same turn. Pi's default
+   transport does not, so its printed command sets SSE instead. If an agent
+   gives up rather than falling back, its turn writes no log at all.
 3. **You are signed in a way that goes around the tool.** A ChatGPT sign-in on
    OpenCode talks to a different host on purpose. Use an API key for that one.
    Codex is different: pick the ChatGPT route in the wizard and it works.
@@ -371,12 +466,24 @@ of these happened:
 
 ## How much this was tested
 
-- **Claude Code on the direct Anthropic API, and OMP, are tested end to end.**
-  The measurements above are real.
-- **The others were verified** by reading the published code of each agent and
-  by driving them against a local listener. Claude Code on Google Vertex AI is
-  in this group, verified against Anthropic's own Vertex documentation, not
-  yet driven against a real Vertex project.
+Last checked on 2026-10-06 against the current release of each agent.
+
+- **Tested end to end with a real login, a real capture written:** Claude Code
+  2.1.292 on the direct Anthropic API, Codex 0.160.0 on a ChatGPT
+  subscription, and GitHub Copilot CLI 1.0.92 on a GitHub subscription. The
+  measurements above are real.
+- **Tested end to end against a local stand-in server** (the agent started,
+  read the printed config, and sent its request through this tool to the
+  path the catalogue predicts): OpenCode 1.15.10's custom OpenAI-compatible
+  route, Pi 0.75.5's custom routes, OMP 18.7.0's custom routes on both wire
+  formats, and Copilot CLI 1.0.92's bring-your-own-key route on both wire
+  formats.
+- **Verified by reading the shipped code only:** Gemini CLI 0.33.0's two
+  variables, and Claude Code's Vertex AI variable. Gemini CLI's Google login
+  was driven for real and failed as described above, because the account used
+  is an individual one; the API-key route was not driven. Claude Code on
+  Vertex AI is verified against Anthropic's own Vertex documentation, not yet
+  driven against a real Vertex project.
 - **Junie is the least-verified entry in the catalogue.** Junie CLI is
   closed source, so unlike every other agent here its entry was not checked
   against real source, only against JetBrains' published Junie CLI docs

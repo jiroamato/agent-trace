@@ -495,3 +495,209 @@ describe("renderMarkdown header redaction", () => {
     expect(out).toContain("[REDACTED]");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Claude Code 2.1.x - tool search, context management, server-side tools
+// ---------------------------------------------------------------------------
+
+describe("renderMarkdown for Anthropic with tool search on", () => {
+  const out = renderMarkdown({
+    ...BASE,
+    agent: "Claude Code",
+    renderer: "anthropic",
+    path: "/v1/messages?beta=true",
+    requestBody: body({
+      model: "claude-haiku-4-5",
+      system: [{ type: "text", text: "You are Claude Code." }],
+      context_management: {
+        edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+      },
+      tools: [
+        { name: "Read", description: "Read a file", input_schema: {} },
+        {
+          name: "NotebookEdit",
+          description: "Edit a notebook",
+          input_schema: {},
+          defer_loading: true,
+        },
+        { type: "tool_search_tool_regex_20251119", name: "tool_search" },
+      ],
+      messages: [
+        { role: "user", content: "hello" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_1",
+              name: "tool_search",
+              input: { query: "notebook" },
+            },
+            {
+              type: "tool_search_tool_result",
+              tool_use_id: "srvtoolu_1",
+              content: [{ type: "tool_reference", tool_name: "NotebookEdit" }],
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_reference", tool_name: "NotebookEdit" }],
+        },
+      ],
+    }),
+    responseRaw: "",
+  });
+
+  it("shows the context management edits next to the other settings", () => {
+    expect(out).toContain("**context_management**");
+    expect(out).toContain("clear_thinking_20251015");
+  });
+
+  it("marks a deferred tool, since the model sees only its name until it searches", () => {
+    expect(out).toContain("### NotebookEdit (deferred)");
+    expect(out).toContain("### Read\n");
+    expect(out).not.toContain("### Read (deferred)");
+  });
+
+  it("shows a built-in tool's versioned type, which is all that identifies it", () => {
+    expect(out).toContain("### tool_search");
+    expect(out).toContain("**type**: tool_search_tool_regex_20251119");
+  });
+
+  it("renders a tool reference as a tag rather than a JSON dump", () => {
+    expect(out).toContain('<tool-reference name="NotebookEdit" />');
+  });
+
+  it("renders a server-side tool call and its result under their own tags", () => {
+    expect(out).toContain(
+      '<server-tool-use name="tool_search" id="srvtoolu_1">'
+    );
+    expect(out).toContain(
+      '<server-tool-result type="tool_search_tool_result" tool-use-id="srvtoolu_1">'
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex 0.160.0 - no instructions, tools inside an additional_tools item,
+// custom (free-text) tool calls
+// ---------------------------------------------------------------------------
+
+describe("renderMarkdown for a Codex 0.160 request", () => {
+  const out = renderMarkdown({
+    ...BASE,
+    agent: "Codex",
+    renderer: "openai",
+    path: "/backend-api/codex/responses",
+    requestBody: body({
+      model: "gpt-6-astra",
+      input: [
+        {
+          type: "additional_tools",
+          id: "at_1",
+          role: "developer",
+          tools: [
+            {
+              type: "namespace",
+              name: "functions",
+              description: "",
+              tools: [
+                {
+                  type: "custom",
+                  name: "exec",
+                  description: "Run JavaScript code",
+                  format: { type: "grammar", syntax: "lark" },
+                },
+                {
+                  type: "function",
+                  name: "shell",
+                  description: "Run a shell command",
+                  parameters: { type: "object" },
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "You are Codex." }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "pong please" }],
+        },
+        {
+          type: "custom_tool_call",
+          call_id: "call_1",
+          name: "exec",
+          input: "await t.shell('ls')",
+        },
+        { type: "custom_tool_call_output", call_id: "call_1", output: "a b" },
+      ],
+    }),
+    responseRaw:
+      'data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"ct_1","name":"exec"}}\n' +
+      'data: {"type":"response.custom_tool_call_input.delta","item_id":"ct_1","delta":"await t.sh"}\n' +
+      'data: {"type":"response.custom_tool_call_input.delta","item_id":"ct_1","delta":"ell(\'pwd\')"}\n' +
+      'data: {"type":"response.completed","response":{"status":"completed"}}\n',
+  });
+
+  it("lists the tools carried inside the additional_tools item under <tools>", () => {
+    expect(out).toContain("<tools>");
+    expect(out).toContain("### exec");
+    expect(out).toContain("### shell");
+    expect(out).toContain("**namespace**: functions");
+  });
+
+  it("marks a custom tool's type and shows its format, since it has no JSON schema", () => {
+    expect(out).toContain("**type**: custom");
+    expect(out).toContain('"syntax": "lark"');
+  });
+
+  it("does not repeat the additional_tools item as a message", () => {
+    expect(out).not.toContain('"type": "additional_tools"');
+    expect(out).toContain(
+      '<message index="1" role="developer">\n\nYou are Codex.'
+    );
+  });
+
+  it("still shows the developer messages, roles and all, since that is where the system prompt lives now", () => {
+    expect(out).toContain("You are Codex.");
+    expect(out).toContain('role="developer"');
+  });
+
+  it("renders a custom tool call's free-text input as plain text, not JSON", () => {
+    expect(out).toContain(
+      '<tool-use name="exec" id="call_1">\n\n```\nawait t.shell(\'ls\')\n```'
+    );
+  });
+
+  it("renders the custom tool call's output as a tool result", () => {
+    expect(out).toContain('<tool-result call-id="call_1">\n\na b');
+  });
+
+  it("reassembles a streamed custom tool call from its input deltas", () => {
+    expect(out).toContain(
+      '<tool-use name="exec" id="ct_1">\n\n```\nawait t.shell(\'pwd\')\n```'
+    );
+  });
+});
+
+describe("renderMarkdown header redaction for Copilot", () => {
+  it("hides the copilot-session-token header, which is a signed session credential", () => {
+    const out = renderMarkdown({
+      ...BASE,
+      agent: "GitHub Copilot CLI",
+      renderer: "openai",
+      headers: { "copilot-session-token": "eyJ.secret.jwt" },
+      path: "/responses",
+      requestBody: body({ model: "x", input: "hi" }),
+      responseRaw: "",
+    });
+    expect(out).not.toContain("eyJ.secret.jwt");
+    expect(out).toContain("copilot-session-token: [REDACTED]");
+  });
+});

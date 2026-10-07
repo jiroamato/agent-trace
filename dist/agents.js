@@ -75,8 +75,20 @@ const PI_NOTE = "Pi has no base URL variable and no flag. A config file is the o
  * is the only caller that passes it. Omitted, as it is for every catalogue
  * entry above, Pi keeps its built-in catalogue for that provider, which is
  * correct there because those routes really do talk to Anthropic or OpenAI.
+ *
+ * `api`, when given alongside a model, pins which wire protocol Pi speaks to
+ * that model. Pi's built-in `openai` provider speaks the Responses API, so
+ * without this an "OpenAI-compatible (chat/completions)" custom target would
+ * get POST /v1/responses - which a local server such as Ollama or LM Studio
+ * may not serve. Verified against Pi 0.75.5: `openai-completions` on the
+ * model entry sends POST /v1/chat/completions instead.
  */
-function piModels(providerId, baseUrl, modelId) {
+function piModels(providerId, baseUrl, modelId, api) {
+    const model = modelId
+        ? api
+            ? `{ "id": "${modelId}", "api": "${api}" }`
+            : `{ "id": "${modelId}" }`
+        : undefined;
     return {
         path: "~/.pi/agent/models.json",
         language: "json",
@@ -84,8 +96,8 @@ function piModels(providerId, baseUrl, modelId) {
             "{",
             '  "providers": {',
             `    "${providerId}": {`,
-            `      "baseUrl": "${baseUrl}"${modelId ? "," : ""}`,
-            ...(modelId ? [`      "models": [{ "id": "${modelId}" }]`] : []),
+            `      "baseUrl": "${baseUrl}"${model ? "," : ""}`,
+            ...(model ? [`      "models": [${model}]`] : []),
             "    }",
             "  }",
             "}",
@@ -93,27 +105,72 @@ function piModels(providerId, baseUrl, modelId) {
     };
 }
 /**
- * OMP's provider override file, in YAML, under ~/.omp/agent/models.yml.
+ * OMP's provider file, in YAML, under ~/.omp/agent/models.yml.
  *
  * OMP does not know, and this tool cannot know, which backend the student is
  * actually pointing at - Ollama, LM Studio, llama.cpp, LiteLLM, or something
  * else entirely - so the provider key below is a generic placeholder
- * ("custom") rather than a real backend name. OMP does not care what the key
- * is called, only that baseUrl is set correctly under it, so the placeholder
- * costs the student nothing; they may rename it if they prefer a name that
- * matches their backend.
+ * ("custom") rather than a real backend name. The student may rename it if
+ * they prefer a name that matches their backend; the printed command names
+ * the same key, so both must change together.
+ *
+ * A provider OMP does not already know needs three things before it has any
+ * model to offer at all (verified against OMP 18.7.0): the wire protocol
+ * (`api`), a key (`apiKey`), and at least one model. A bare `baseUrl` on a
+ * new key validates fine and then offers nothing, which is why the earlier
+ * shape of this file left a student with "No default model selected".
+ *
+ * `apiKey` holds the *name* of an environment variable, not a key: OMP
+ * resolves it from the environment at request time. When that variable is
+ * not set OMP sends the name itself as the bearer token, which a local
+ * server that checks no key simply ignores - so one file works unchanged
+ * for a hosted provider that needs the real key and for Ollama.
  */
-function ompModels(baseUrl) {
+function ompModels(baseUrl, api, apiKeyEnv, modelId) {
     return {
         path: "~/.omp/agent/models.yml",
         language: "yaml",
-        body: ["providers:", "  custom:", `    baseUrl: "${baseUrl}"`].join("\n"),
+        body: [
+            "providers:",
+            "  custom:",
+            `    baseUrl: "${baseUrl}"`,
+            `    api: ${api}`,
+            `    apiKey: ${apiKeyEnv}`,
+            "    models:",
+            `      - id: "${modelId}"`,
+        ].join("\n"),
     };
 }
 const OMP_NOTE = "OMP has no backend of its own to hard-code the way the rest of this " +
     "catalogue does. It can point at Ollama, LM Studio, llama.cpp, LiteLLM, or " +
     "any other server that speaks one of the wire formats offered here, so " +
     "every OMP setup goes through the base URL and wire format you chose.";
+const OMP_KEY_NOTE = "The apiKey line names an environment variable, not a key. Export that " +
+    "variable with the key your server expects before you run OMP. A local " +
+    "server that checks no key can leave it unset: OMP then sends the " +
+    "variable's name as the token, and the server ignores it.";
+const OMP_MODEL_NOTE = "OMP only offers a model it has been told about, so the models.yml entry " +
+    "and the --model flag both name the one you selected. Edit the file to add " +
+    "more models under the same provider if you want to switch between them.";
+/**
+ * Copilot CLI's bring-your-own-key route. Since the 1.0.x releases of 2026
+ * the CLI reads a COPILOT_PROVIDER_* family of variables that point it at a
+ * server of your own, with no GitHub login at all: `copilot help
+ * environment` lists them. The subscription route's COPILOT_API_URL still
+ * works (verified end to end on 1.0.92) but it tells the CLI where GitHub's
+ * own model routing lives, so pointing it at an unrelated server would send
+ * GitHub-shaped requests with GitHub credentials. A custom base URL
+ * therefore borrows these two customOnly templates instead - one per wire
+ * format, because COPILOT_PROVIDER_TYPE must match the server.
+ */
+const COPILOT_BYOK_NOTE = "This is Copilot CLI's bring-your-own-key route (the COPILOT_PROVIDER_* " +
+    "variables), which needs no GitHub login. Export COPILOT_PROVIDER_API_KEY " +
+    "with the key your server expects; a local server that checks no key can " +
+    "leave it unset. Copilot refuses to start this route without an explicit " +
+    "model, which is why COPILOT_MODEL is set to the one you selected.";
+const COPILOT_BYOK_WIRE_NOTE = "COPILOT_PROVIDER_TYPE=openai speaks chat/completions by default. If your " +
+    "server only offers the Responses API, add COPILOT_PROVIDER_WIRE_API=" +
+    "responses to the command.";
 /**
  * Junie's custom-proxy override, in JSON, under ~/.junie/config.json (user
  * scope; see Junie's own configuration-files docs for how a project-scope
@@ -183,6 +240,23 @@ const ANTIGRAVITY_LOGIN_WARNING = "This entry covers the Gemini API key route on
     "host rather than the Code Assist host Gemini CLI's own free login uses - " +
     "so this catalogue does not claim that route works. Ask for it via the " +
     "issue tracker if you need it logged.";
+/**
+ * Gemini CLI's Google-login route used to be the free tier. On 2026-06-18
+ * Google stopped serving Gemini CLI to individual accounts - free, AI Pro
+ * and AI Ultra alike - and pointed them at Antigravity CLI instead. The
+ * route itself still exists, and the variable is still read (0.33.0's
+ * code_assist/server.js reads CODE_ASSIST_ENDPOINT exactly as before), but
+ * for anyone without a Gemini Code Assist Standard or Enterprise licence
+ * the first call now fails with the message quoted below, before any
+ * generateContent request is ever made. Reproduced on 0.33.0 with a
+ * personal account, with and without this tool in the path.
+ */
+const GEMINI_LOGIN_WARNING = "Google stopped serving Gemini CLI to individual Google accounts (free, " +
+    "AI Pro and AI Ultra alike) on 2026-06-18. This route now works only with " +
+    "a Gemini Code Assist Standard or Enterprise licence. Anyone else sees " +
+    '"This client is no longer supported for Gemini Code Assist for ' +
+    'individuals" and an empty logs folder. Use the Gemini API key route, or ' +
+    "Antigravity CLI, Google's replacement for Gemini CLI.";
 const OPENCODE_NOTE = "The environment variable above works, but only by accident: OpenCode passes " +
     "no base URL of its own for this provider, so the bundled SDK falls back to " +
     "reading the variable. The config file below is the durable way to do it.";
@@ -309,20 +383,63 @@ const AGENTS = [
                 label: "GitHub subscription",
                 upstreamHost: "api.githubcopilot.com",
                 renderer: "openai",
+                // Undocumented since the BYOK variables arrived (it is missing from
+                // `copilot help environment`), but still read: verified end to end
+                // on 1.0.92, where GET /models, POST /auto and POST /responses all
+                // arrived through it.
                 env: [["COPILOT_API_URL", "{baseUrl}"]],
                 bin: "copilot",
                 notes: [
                     "Copilot's built-in MCP servers add their tools to every request, and " +
-                        "they make calls of their own, so you get more documents than turns " +
-                        "you typed. That is what your agent really sends, so it is worth " +
-                        "reading once. If you want a smaller capture, add " +
-                        "--disable-builtin-mcps to the command.",
+                        "the CLI talks to GitHub's remote MCP server (POST /mcp/...) and " +
+                        "to its Auto model router (POST /auto) around every turn. Those " +
+                        "calls carry no system prompt and no model reply, so they are " +
+                        "forwarded but not logged, the same as token counting elsewhere. " +
+                        "If you want a smaller capture, add --disable-builtin-mcps to " +
+                        "the command.",
+                    "Copilot first tries a WebSocket for /responses. This tool answers " +
+                        "that with 426, and Copilot falls back to plain HTTP on the same " +
+                        "turn (verified on 1.0.92), so the capture is complete.",
                 ],
-                warnings: [
-                    "Some models negotiate a WebSocket transport. This tool cannot see a " +
-                        "WebSocket, so those turns write no log at all. If your logs folder " +
-                        "stays empty, try a different model. gpt-5.1 used plain HTTP in testing.",
+            },
+            {
+                id: "byok-openai",
+                label: "Custom provider (OpenAI-compatible)",
+                customOnly: true,
+                // Unused: a customOnly template is only ever resolved as a custom
+                // target, whose upstream comes from what the student typed.
+                upstreamHost: "",
+                renderer: "openai",
+                // Copilot appends /chat/completions to the base URL, so it needs
+                // the /v1 (verified on 1.0.92: POST /v1/chat/completions).
+                suffix: "/v1",
+                env: [
+                    ["COPILOT_PROVIDER_BASE_URL", "{baseUrl}"],
+                    ["COPILOT_PROVIDER_TYPE", "openai"],
+                    ["COPILOT_MODEL", "{model}"],
                 ],
+                bin: "copilot",
+                // Also the catch-all for "raw"/not sure - see the OpenCode entry
+                // below for why an OpenAI-compatible guess is the better default.
+                customTemplateFor: ["openai", "raw"],
+                notes: [COPILOT_BYOK_NOTE, COPILOT_BYOK_WIRE_NOTE],
+            },
+            {
+                id: "byok-anthropic",
+                label: "Custom provider (Anthropic-compatible)",
+                customOnly: true,
+                upstreamHost: "",
+                renderer: "anthropic",
+                // The Anthropic SDK appends /v1/messages itself, so no suffix
+                // (verified on 1.0.92: POST /v1/messages).
+                env: [
+                    ["COPILOT_PROVIDER_BASE_URL", "{baseUrl}"],
+                    ["COPILOT_PROVIDER_TYPE", "anthropic"],
+                    ["COPILOT_MODEL", "{model}"],
+                ],
+                bin: "copilot",
+                customTemplateFor: ["anthropic"],
+                notes: [COPILOT_BYOK_NOTE],
             },
         ],
     },
@@ -355,8 +472,8 @@ const AGENTS = [
                         body: [
                             "{",
                             '  "$schema": "https://opencode.ai/config.json",',
-                            '  "model": "anthropic/claude-sonnet-4-5",',
-                            '  "small_model": "anthropic/claude-sonnet-4-5",',
+                            '  "model": "anthropic/claude-sonnet-5-5",',
+                            '  "small_model": "anthropic/claude-sonnet-5-5",',
                             '  "provider": {',
                             '    "anthropic": {',
                             '      "options": {',
@@ -394,8 +511,8 @@ const AGENTS = [
                         body: [
                             "{",
                             '  "$schema": "https://opencode.ai/config.json",',
-                            '  "model": "openai/gpt-5.1",',
-                            '  "small_model": "openai/gpt-5.1",',
+                            '  "model": "openai/gpt-5.6",',
+                            '  "small_model": "openai/gpt-5.6",',
                             '  "provider": {',
                             '    "openai": {',
                             '      "options": {',
@@ -489,15 +606,18 @@ const AGENTS = [
         id: "omp",
         label: "OMP (Oh My Pi)",
         // Every setup for OMP goes through the custom-base-url questions - see
-        // AgentEntry.alwaysCustom. The one provider below never reaches the
-        // wizard; it exists purely to hold the bin and setup-file template that
-        // resolveCustomTarget borrows from, the same way findCustomTemplate
-        // borrows from a real provider for every other agent.
+        // AgentEntry.alwaysCustom. The two providers below never reach the
+        // wizard; they exist purely to hold the setup-file template that
+        // resolveCustomTarget borrows from, one per wire format, because OMP's
+        // models.yml must name the wire protocol (`api`) a new provider speaks -
+        // the same shape as Junie below. Every OMP custom target also needs a
+        // model (see customTargetNeedsModel): OMP only offers models it has
+        // been told about.
         alwaysCustom: true,
         providers: [
             {
-                id: CUSTOM_ID,
-                label: CUSTOM_LABEL,
+                id: "anthropic",
+                label: "Anthropic-compatible",
                 // Unused: OMP never reaches the normal (non-custom) resolution path
                 // that would read this.
                 upstreamHost: "",
@@ -505,29 +625,45 @@ const AGENTS = [
                 // student's answer, not from this template. See resolveCustomTarget.
                 renderer: "raw",
                 bin: "omp",
-                setup: [ompModels("{baseUrl}")],
-                notes: [OMP_NOTE],
+                // Pinned explicitly: OMP picks a default model from whatever it can
+                // authenticate, which is not necessarily the one in this file.
+                args: ["--model", "custom/{model}"],
+                customTemplateFor: ["anthropic"],
+                // OMP's Anthropic client appends /v1/messages itself (verified on
+                // 18.7.0), so no suffix.
+                setup: [
+                    ompModels("{baseUrl}", "anthropic-messages", "ANTHROPIC_API_KEY", "{model}"),
+                ],
+                notes: [OMP_NOTE, OMP_KEY_NOTE, OMP_MODEL_NOTE],
+            },
+            {
+                id: "openai",
+                label: "OpenAI-compatible",
+                upstreamHost: "",
+                renderer: "raw",
+                bin: "omp",
+                args: ["--model", "custom/{model}"],
+                // OMP's chat-completions client appends /chat/completions, so the
+                // base URL carries the /v1 (verified on 18.7.0).
+                suffix: "/v1",
+                // Also the catch-all for "raw"/not sure - see the OpenCode and Pi
+                // entries above for why an OpenAI-compatible guess is the better
+                // default for an unidentified custom server.
+                customTemplateFor: ["openai", "raw"],
+                setup: [
+                    ompModels("{baseUrl}", "openai-completions", "OPENAI_API_KEY", "{model}"),
+                ],
+                notes: [OMP_NOTE, OMP_KEY_NOTE, OMP_MODEL_NOTE],
             },
         ],
     },
     {
         id: "gemini",
         label: "Gemini CLI",
+        // The API key route leads now. Google stopped serving Gemini CLI to
+        // individual Google accounts on 2026-06-18 (see GEMINI_LOGIN_WARNING),
+        // so for most students the login route no longer works at all.
         providers: [
-            {
-                id: "google-login",
-                label: "Free Google account login",
-                upstreamHost: "cloudcode-pa.googleapis.com",
-                renderer: "gemini",
-                env: [["CODE_ASSIST_ENDPOINT", "{baseUrl}"]],
-                bin: "gemini",
-                notes: [
-                    "This is the free tier. You do not need to buy anything to finish the lesson.",
-                    "On this route Gemini also makes several housekeeping calls that carry no " +
-                        "prompt. This tool forwards them but does not log them, so your logs " +
-                        "folder holds real turns only.",
-                ],
-            },
             {
                 id: "api-key",
                 label: "Gemini API key",
@@ -548,6 +684,20 @@ const AGENTS = [
                         "account login, and CODE_ASSIST_ENDPOINT is ignored under an API key. " +
                         "Neither one gives you an error. You just get an empty logs folder.",
                 ],
+            },
+            {
+                id: "google-login",
+                label: "Google account login (Code Assist licence)",
+                upstreamHost: "cloudcode-pa.googleapis.com",
+                renderer: "gemini",
+                env: [["CODE_ASSIST_ENDPOINT", "{baseUrl}"]],
+                bin: "gemini",
+                notes: [
+                    "On this route Gemini also makes several housekeeping calls that carry no " +
+                        "prompt. This tool forwards them but does not log them, so your logs " +
+                        "folder holds real turns only.",
+                ],
+                warnings: [GEMINI_LOGIN_WARNING],
             },
         ],
     },
@@ -640,6 +790,14 @@ const AGENTS = [
  * from the top should meet the ones that work first. The sort is stable, so
  * popularity still decides the order inside each group.
  */
+/**
+ * The providers the wizard may show for an agent: every catalogue entry
+ * except the customOnly templates, which exist only to be borrowed by a
+ * custom target (see ProviderEntry.customOnly).
+ */
+function visibleProviders(agent) {
+    return (agent.providers ?? []).filter((p) => !p.customOnly);
+}
 export function listAgents() {
     const summaries = AGENTS.map((agent) => ({
         id: agent.id,
@@ -648,11 +806,8 @@ export function listAgents() {
         // An alwaysCustom agent never shows the provider question - askChoice
         // skips straight past it (see agent.alwaysCustom above) - regardless of
         // how many internal templates its catalogue entry holds for
-        // findCustomTemplate to pick between. Junie is the first alwaysCustom
-        // agent with more than one, so this used to be true by coincidence for
-        // every alwaysCustom agent (OMP has exactly one provider); it is
-        // spelled out here now that a second one exists.
-        needsProvider: !agent.alwaysCustom && (agent.providers?.length ?? 0) > 1,
+        // findCustomTemplate to pick between. OMP and Junie both hold two.
+        needsProvider: !agent.alwaysCustom && visibleProviders(agent).length > 1,
         alwaysCustom: agent.alwaysCustom === true,
     }));
     return [
@@ -672,9 +827,12 @@ export function listAgents() {
  */
 export function listProviders(agentId) {
     const agent = AGENTS.find((a) => a.id === agentId);
-    if (!agent?.providers || agent.providers.length < 2)
+    if (!agent)
         return [];
-    return agent.providers.map((p) => ({ id: p.id, label: p.label }));
+    const providers = visibleProviders(agent);
+    if (providers.length < 2)
+        return [];
+    return providers.map((p) => ({ id: p.id, label: p.label }));
 }
 /**
  * Every catalogue provider for one agent, regardless of how many there are.
@@ -687,7 +845,9 @@ export function listProviders(agentId) {
  */
 export function agentProviders(agentId) {
     const agent = AGENTS.find((a) => a.id === agentId);
-    return (agent?.providers ?? []).map((p) => ({ id: p.id, label: p.label }));
+    if (!agent)
+        return [];
+    return visibleProviders(agent).map((p) => ({ id: p.id, label: p.label }));
 }
 // ---------------------------------------------------------------------------
 // Which requests are worth writing down
@@ -707,9 +867,21 @@ export function agentProviders(agentId) {
  *  - Gemini counts tokens under a different name, and on the Google login route
  *    it fires several calls that carry no prompt at all. On that route the only
  *    calls worth keeping are the ones that generate content.
+ *  - Copilot CLI (1.0.92) talks JSON-RPC to GitHub's remote MCP server under
+ *    `/mcp/...` (server/discover, tools/list) and asks its Auto model router
+ *    at `/auto` which model to use, both around the real `/responses` call.
+ *    Neither carries a system prompt or returns model output.
  */
 export function shouldLogRequest(method, reqPath, renderer) {
     if (method.toUpperCase() !== "POST")
+        return false;
+    const pathOnly = reqPath.split("?")[0];
+    // MCP traffic is JSON-RPC between the agent and a tool server, never a
+    // model call, whichever host happens to serve it.
+    if (/^\/mcp(\/|$)/.test(pathOnly))
+        return false;
+    // Copilot's Auto model router: a routing decision, not a model reply.
+    if (pathOnly === "/auto")
         return false;
     // Case-insensitive on purpose: the streaming call is `:streamGenerateContent`,
     // with a capital G, and the non-streaming one is `:generateContent`.
@@ -719,17 +891,41 @@ export function shouldLogRequest(method, reqPath, renderer) {
     // (Claude Code on Vertex AI).
     return !/count[_-]?tokens/i.test(reqPath);
 }
-// ---------------------------------------------------------------------------
-// Resolution - the seam
-// ---------------------------------------------------------------------------
-function buildCommand(provider, baseUrl, platform) {
-    const fill = (text) => text.replace(/\{baseUrl\}/g, baseUrl);
+function fillTemplate(text, values) {
+    return text
+        .replace(/\{baseUrl\}/g, values.baseUrl)
+        .replace(/\{model\}/g, values.model ?? "");
+}
+function fillSetup(files, values) {
+    return files.map((file) => ({
+        ...file,
+        body: fillTemplate(file.body, values),
+    }));
+}
+function buildCommand(provider, values, platform) {
+    const fill = (text) => fillTemplate(text, values);
     const env = (provider.env ?? []).map(([key, value]) => [key, fill(value)]);
-    // Arguments take the base URL too. Codex has no variable for it, so its
-    // whole override arrives as a flag.
-    const args = (provider.args ?? []).map(fill);
+    // Arguments take the placeholders too. Codex has no variable for its base
+    // URL, so its whole override arrives as a flag; OMP pins its model with
+    // one. A filled argument is quoted when it needs to be - see
+    // argumentQuote - unless the catalogue already wrote it with quoting of
+    // its own, as Codex's TOML flag is, in which case it is left exactly as
+    // written.
+    const args = (provider.args ?? []).map((arg) => /^["']/.test(arg) ? fill(arg) : argumentQuote(fill(arg), platform));
     const bin = [provider.bin, ...args].join(" ");
     return withEnv(env, bin, platform);
+}
+/**
+ * Characters that can sit unquoted in a POSIX shell word and a PowerShell
+ * bare argument alike. Everything a URL or a plain model ID is made of is
+ * here; anything else (a space, a quote, `$`, `;`, `&`, ...) gets the
+ * shell's own quoting so an odd model ID cannot break the printed command.
+ */
+const SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function argumentQuote(value, platform) {
+    if (SAFE_WORD.test(value))
+        return value;
+    return platform === "win32" ? powerShellQuote(value) : shellQuote(value);
 }
 /**
  * Join one or more `KEY=value` environment assignments onto the command that
@@ -752,7 +948,13 @@ function withEnv(env, bin, platform) {
             bin,
         ].join("; ");
     }
-    return [...env.map(([key, value]) => `${key}=${value}`), bin].join(" ");
+    // A base URL never needs quoting and never has had it, so the printed
+    // command stays the plain `KEY=value` form a student can read at a glance.
+    // A model ID with a space or a quote in it (see argumentQuote) does.
+    return [
+        ...env.map(([key, value]) => `${key}=${argumentQuote(value, platform)}`),
+        bin,
+    ].join(" ");
 }
 /** Quote one complete POSIX shell argument, including embedded single quotes. */
 function shellQuote(value) {
@@ -852,9 +1054,14 @@ const RAW_WIRE_FORMAT_NOTE = 'You picked "not sure" for the wire format, so ever
  *   an existing built-in provider (openai or anthropic), and that
  *   provider's built-in model names almost never exist on a self-hosted
  *   backend, whichever wire format was chosen for rendering.
+ * - OMP needs one on every route: a provider OMP has not heard of offers no
+ *   models until models.yml lists some (see ompModels).
+ * - Copilot CLI needs one on every route: its bring-your-own-key route
+ *   refuses to start without an explicit model ("BYOK providers require an
+ *   explicit model", 1.0.92).
  */
 export function customTargetNeedsModel(agentId, renderer) {
-    if (agentId === "pi")
+    if (agentId === "pi" || agentId === "omp" || agentId === "copilot")
         return true;
     if (agentId === "opencode")
         return renderer === "openai";
@@ -975,11 +1182,24 @@ function resolveCustomTarget(agent, choice, port, platform) {
                 "catalogue with the one model you selected, since Pi's built-in " +
                 "model names almost never exist on a custom server.",
         ];
+        // Pi's built-in openai provider speaks the Responses API. The wire
+        // format the student picked says chat/completions, and a local server
+        // is far more likely to serve that, so the model entry pins it (see
+        // piModels). The Anthropic route needs no such pin: there is only one
+        // Messages API.
+        const api = renderer === "anthropic" ? undefined : "openai-completions";
         if (renderer === "anthropic") {
             notes.push("Model discovery only checks the OpenAI-style /v1/models listing " +
                 "endpoint, which an Anthropic-compatible server often does not " +
                 "expose. If discovery found nothing here and you typed the model " +
                 "ID by hand, that is expected - it does not mean the ID is wrong.");
+        }
+        else {
+            notes.push('The "api": "openai-completions" on the model entry makes Pi send ' +
+                "chat/completions requests, which is what the wire format you " +
+                "chose means. Without it Pi would use the Responses API, which " +
+                "many local servers do not serve. Change it to openai-responses " +
+                "if your server only offers that.");
         }
         if (renderer === "raw")
             notes.push(RAW_WIRE_FORMAT_NOTE);
@@ -991,12 +1211,24 @@ function resolveCustomTarget(agent, choice, port, platform) {
             upstreamBaseUrl: upstreamBaseUrlWithPath(upstream),
             renderer,
             baseUrl,
-            command: buildCommand(template, baseUrl, platform),
-            setup: [piModels(providerId, baseUrl, model)],
+            command: buildCommand(template, { baseUrl, model }, platform),
+            setup: [piModels(providerId, baseUrl, model, api)],
             notes,
             warnings: template.warnings ?? [],
         };
     }
+    // Every other agent whose custom target needs a model declared up front
+    // (OMP, Copilot CLI - see customTargetNeedsModel) hands it to the
+    // borrowed template through its `{model}` placeholder, in the command
+    // and the setup file alike.
+    let model;
+    if (customTargetNeedsModel(agent.id, renderer)) {
+        const modelResult = resolveCustomModel(choice, `${agent.label}'s custom target`);
+        if (modelResult.kind === "error")
+            return modelResult;
+        model = modelResult.model;
+    }
+    const values = { baseUrl, model };
     const notes = [
         `This command is built from ${agent.label}'s own setup pattern, since a ` +
             `custom target has no dedicated one of its own. If a note below assumes ` +
@@ -1013,11 +1245,8 @@ function resolveCustomTarget(agent, choice, port, platform) {
         upstreamBaseUrl: upstreamBaseUrlWithPath(upstream),
         renderer,
         baseUrl,
-        command: template ? buildCommand(template, baseUrl, platform) : agent.id,
-        setup: (template?.setup ?? []).map((file) => ({
-            ...file,
-            body: file.body.replace(/\{baseUrl\}/g, baseUrl),
-        })),
+        command: template ? buildCommand(template, values, platform) : agent.id,
+        setup: fillSetup(template?.setup ?? [], values),
         notes,
         warnings: template?.warnings ?? [],
     };
@@ -1067,27 +1296,30 @@ export function resolveChoice(choice, options) {
     if (agent.alwaysCustom || choice.provider === CUSTOM_ID) {
         return resolveCustomTarget(agent, choice, options.port, options.platform);
     }
+    // customOnly templates are not real routes: a saved choice naming one
+    // would otherwise resolve to a target with no upstream host at all.
+    const providers = visibleProviders(agent);
     let provider;
-    if (agent.providers.length === 1) {
+    if (providers.length === 1) {
         // One provider, so the wizard never asked. Ignore anything saved.
-        provider = agent.providers[0];
+        provider = providers[0];
     }
     else if (choice.provider == null) {
         return {
             kind: "error",
             message: `${agent.label} can drive more than one model provider, so a provider ` +
                 `must be chosen. Run with --force to choose again. Providers: ` +
-                `${agent.providers.map((p) => p.id).join(", ")}.`,
+                `${providers.map((p) => p.id).join(", ")}.`,
         };
     }
     else {
-        provider = agent.providers.find((p) => p.id === choice.provider);
+        provider = providers.find((p) => p.id === choice.provider);
         if (!provider) {
             return {
                 kind: "error",
                 message: `Unknown provider "${choice.provider}" for ${agent.label}. Run with ` +
                     `--force to choose again. Providers: ` +
-                    `${agent.providers.map((p) => p.id).join(", ")}.`,
+                    `${providers.map((p) => p.id).join(", ")}.`,
             };
         }
     }
@@ -1101,11 +1333,8 @@ export function resolveChoice(choice, options) {
         upstreamHost: provider.upstreamHost,
         renderer: provider.renderer,
         baseUrl,
-        command: buildCommand(provider, baseUrl, options.platform),
-        setup: (provider.setup ?? []).map((file) => ({
-            ...file,
-            body: file.body.replace(/\{baseUrl\}/g, baseUrl),
-        })),
+        command: buildCommand(provider, { baseUrl }, options.platform),
+        setup: fillSetup(provider.setup ?? [], { baseUrl }),
         notes: provider.notes ?? [],
         warnings: provider.warnings ?? [],
     };

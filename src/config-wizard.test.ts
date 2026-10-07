@@ -236,3 +236,86 @@ describe("the Pi custom-target model step", () => {
     expect(answer.choice.customModel).toBeUndefined();
   });
 });
+
+describe("the OMP custom-target model step", () => {
+  // OMP is alwaysCustom: no provider question, straight to the base URL and
+  // wire format, and then - new - the same model step Pi gets, because a
+  // provider OMP has not heard of offers no models until told.
+  it.each(["openai", "anthropic", "raw"] as const)(
+    "discovers models for the %s wire format",
+    async (renderer) => {
+      promptMocks.select.mockResolvedValueOnce("omp");
+      promptMocks.text.mockResolvedValueOnce("http://localhost:11434");
+      promptMocks.select.mockResolvedValueOnce(renderer);
+      discoveryMocks.discoverModelIds.mockResolvedValue(["qwen3:8b"]);
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      const answer = await askChoice({ offerToRemember: false });
+
+      expect(discoveryMocks.discoverModelIds).toHaveBeenCalledWith(
+        "http://localhost:11434"
+      );
+      expect(answer.choice).toEqual({
+        agent: "omp",
+        provider: "custom",
+        customBaseUrl: "http://localhost:11434",
+        customRenderer: renderer,
+        customModel: "qwen3:8b",
+      });
+      log.mockRestore();
+    }
+  );
+
+  it("falls back to manual entry when discovery finds nothing", async () => {
+    promptMocks.select.mockResolvedValueOnce("omp");
+    promptMocks.text.mockResolvedValueOnce("http://localhost:11434");
+    promptMocks.select.mockResolvedValueOnce("anthropic");
+    discoveryMocks.discoverModelIds.mockResolvedValue([]);
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    promptMocks.text.mockResolvedValueOnce("claude-x");
+
+    const answer = await askChoice({ offerToRemember: false });
+
+    expect(answer.choice.customModel).toBe("claude-x");
+    warning.mockRestore();
+  });
+
+  it("still asks Junie no model question, since Junie's proxy entry names none", async () => {
+    promptMocks.select.mockResolvedValueOnce("junie");
+    promptMocks.text.mockResolvedValueOnce("http://localhost:11434");
+    promptMocks.select.mockResolvedValueOnce("openai");
+
+    const answer = await askChoice({ offerToRemember: false });
+
+    expect(discoveryMocks.discoverModelIds).not.toHaveBeenCalled();
+    expect(answer.choice.customModel).toBeUndefined();
+  });
+});
+
+describe("the Copilot custom-target model step", () => {
+  it("discovers models for a Copilot custom target, since its BYOK route needs an explicit model", async () => {
+    promptMocks.select.mockResolvedValueOnce("copilot");
+    promptMocks.select.mockResolvedValueOnce("custom");
+    promptMocks.text.mockResolvedValueOnce("http://localhost:11434");
+    promptMocks.select.mockResolvedValueOnce("openai");
+    discoveryMocks.discoverModelIds.mockResolvedValue(["qwen3:8b"]);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const answer = await askChoice({ offerToRemember: false });
+
+    expect(answer.choice.customModel).toBe("qwen3:8b");
+    log.mockRestore();
+  });
+
+  it("does not discover models when Copilot is on its GitHub subscription route", async () => {
+    promptMocks.select.mockResolvedValueOnce("copilot");
+    promptMocks.select.mockResolvedValueOnce("github");
+
+    const answer = await askChoice({ offerToRemember: false });
+
+    expect(discoveryMocks.discoverModelIds).not.toHaveBeenCalled();
+    expect(answer.choice.customModel).toBeUndefined();
+  });
+});
